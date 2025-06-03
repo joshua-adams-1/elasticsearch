@@ -12,6 +12,7 @@ package org.elasticsearch.rest.action.admin.cluster;
 import org.elasticsearch.action.admin.cluster.allocation.ClusterAllocationExplainRequest;
 import org.elasticsearch.action.admin.cluster.allocation.TransportClusterAllocationExplainAction;
 import org.elasticsearch.client.internal.node.NodeClient;
+import org.elasticsearch.common.util.set.Sets;
 import org.elasticsearch.rest.BaseRestHandler;
 import org.elasticsearch.rest.RestRequest;
 import org.elasticsearch.rest.RestUtils;
@@ -21,7 +22,9 @@ import org.elasticsearch.rest.action.RestRefCountedChunkedToXContentListener;
 import org.elasticsearch.xcontent.XContentParser;
 
 import java.io.IOException;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Set;
 
 import static org.elasticsearch.rest.RestRequest.Method.GET;
 import static org.elasticsearch.rest.RestRequest.Method.POST;
@@ -48,20 +51,82 @@ public class RestClusterAllocationExplainAction extends BaseRestHandler {
     }
 
     @Override
+    public Set<String> allSupportedParameters() {
+        return ClusterAllocationExplainRequest.ALL_SUPPORTED_PARAMETERS;
+    }
+
+    @Override
+    public Set<String> supportedQueryParameters() {
+        return ClusterAllocationExplainRequest.QUERY_PARAMETERS;
+    }
+
+    @Override
     public RestChannelConsumer prepareRequest(final RestRequest request, final NodeClient client) throws IOException {
-        final var req = new ClusterAllocationExplainRequest(RestUtils.getMasterNodeTimeout(request));
-        if (request.hasContentOrSourceParam()) {
-            try (XContentParser parser = request.contentOrSourceParamParser()) {
-                ClusterAllocationExplainRequest.parse(req, parser);
+        /*
+            https://github.com/elastic/elasticsearch/issues/127028 introduces dual behaviour for this API.
+            We now support either, but not a mix of:
+            1. Parameters being passed in the URL
+            2. The legacy behaviour of passing parameters in the body of the request
+         */
+
+//        boolean userPassedParametersInPath = !request.params().isEmpty();
+
+        boolean userPassedParametersInPath = isPathParameterProvided(request.params().keySet());
+        final var clusterAllocationExplainRequest = new ClusterAllocationExplainRequest(RestUtils.getMasterNodeTimeout(request));
+
+        if (userPassedParametersInPath) {
+            String index = request.param(ClusterAllocationExplainRequest.INDEX_PARAMETER_NAME);
+            if (index == null) {
+                throw new IllegalArgumentException("The index parameter cannot be blank.");
             }
-        } // else ok, an empty body means "explain the first unassigned shard you find"
-        req.includeYesDecisions(request.paramAsBoolean("include_yes_decisions", false));
-        req.includeDiskInfo(request.paramAsBoolean("include_disk_info", false));
+            clusterAllocationExplainRequest.setIndex(index);
+
+            String shard = request.param(ClusterAllocationExplainRequest.SHARD_PARAMETER_NAME);
+            if (shard == null) {
+                throw new IllegalArgumentException("The shard parameter cannot be blank.");
+            }
+            clusterAllocationExplainRequest.setShard(Integer.parseInt(shard));
+
+            String primary = request.param(ClusterAllocationExplainRequest.PRIMARY_PARAMETER_NAME);
+            if (primary == null) {
+                throw new IllegalArgumentException("The primary parameter cannot be blank.");
+            }
+            clusterAllocationExplainRequest.setPrimary(Boolean.parseBoolean(primary));
+
+            String current_node = request.param(ClusterAllocationExplainRequest.CURRENT_NODE_PARAMETER_NAME);
+            if (current_node == null) {
+                throw new IllegalArgumentException("The current_node parameter cannot be blank.");
+            }
+            clusterAllocationExplainRequest.setCurrentNode(current_node);
+
+            // TODO - include_yes_decisions and include_disk_info
+        } else {
+            if (request.hasContentOrSourceParam()) {
+                try (XContentParser parser = request.contentOrSourceParamParser()) {
+                    ClusterAllocationExplainRequest.parse(clusterAllocationExplainRequest, parser);
+                }
+            } // else ok, an empty body means "explain the first unassigned shard you find"
+            // TODO - Set all 4 params to being consumed
+
+            // TODO - Can we move this outside the IF statement so it runs for both?
+            clusterAllocationExplainRequest.includeYesDecisions(request.paramAsBoolean("include_yes_decisions", false));
+            clusterAllocationExplainRequest.includeDiskInfo(request.paramAsBoolean("include_disk_info", false));
+        }
+
         return channel -> client.execute(
             TransportClusterAllocationExplainAction.TYPE,
-            req,
+            clusterAllocationExplainRequest,
             new RestRefCountedChunkedToXContentListener<>(channel)
         );
+    }
+
+    private boolean isPathParameterProvided(Set<String> parameters) {
+        for (String parameter : parameters) {
+            if (ClusterAllocationExplainRequest.PATH_PARAMETERS.contains(parameter)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
